@@ -1,0 +1,74 @@
+# =====================================================================
+#  企业工单与审批系统 —— 主配置
+#  敏感信息（数据库密码）放在 application-local.yml，该文件已被 gitignore
+# =====================================================================
+server:
+  port: 8081
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+spring:
+  application:
+    name: enterprise-work-order
+  profiles:
+    active: local
+  mvc:
+    # 路由不存在时抛 NoHandlerFoundException，而不是直接返回默认的 404 页面。
+    # 不开启的话，GlobalExceptionHandler 里的 NoHandlerFoundException 分支永远不会触发，
+    # 前端拿到的是 Spring 默认错误响应，结构与 Result 不一致。
+    throw-exception-if-no-handler-found: true
+  web:
+    resources:
+      # 本项目是纯后端接口服务，没有静态资源。关掉静态资源映射，
+      # 否则任何路径都会被 ResourceHttpRequestHandler 接住，同样掩盖 404。
+      add-mappings: false
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/enterprise_work_order?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+    default-property-inclusion: non_null
+
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: com.enterprise.workorder.entity
+  configuration:
+    map-underscore-to-camel-case: true
+    # 控制台打印 SQL，学习阶段便于观察，生产环境请删除或改为 NoLoggingImpl
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+
+# =====================================================================
+#  自定义业务配置
+# =====================================================================
+app:
+  jwt:
+    # HS256 要求密钥不少于 256 位（32 字节）
+    secret: enterprise-work-order-jwt-secret-key-please-change-in-production-2026
+    expire-hours: 24
+    header: Authorization
+    prefix: "Bearer "
+
+logging:
+  level:
+    root: info
+    com.enterprise.workorder: debug

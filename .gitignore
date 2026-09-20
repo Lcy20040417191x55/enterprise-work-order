@@ -1,0 +1,31 @@
+# ==================== 构建产物 ====================
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# ==================== IntelliJ IDEA ====================
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# ==================== 本地配置（含数据库密码，禁止提交）====================
+src/main/resources/application-local.yml
+src/main/resources/application-local.yaml
+src/main/resources/application-local.properties
+
+# ==================== 日志 ====================
+logs/
+*.log
+
+# ==================== 操作系统 ====================
+.DS_Store
+Thumbs.db
+desktop.ini
+# ==================== 手工备份快照（已被 git 取代）====================
+# backup/ 是 git 之前手写的源码快照，与正式源码重复；
+# 其中 20260920-backend*/src/main/resources/application-local.yml 含数据库明文密码，
+# 一旦入库就等于把密码永久写进历史，故整目录排除。
+backup/

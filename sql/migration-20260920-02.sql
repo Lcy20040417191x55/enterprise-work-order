@@ -1,0 +1,31 @@
+-- =====================================================================
+--  迁移脚本 20260920-02
+--  适用对象：已执行过 20260920-01 的环境。
+--  全新部署无需执行，直接用最新的 schema.sql 即可。
+--
+--  主题：为"我审过的工单"（scope=done）补索引。
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- 审批记录的操作人索引
+--
+-- 修复的现象：scope=done 的列表查询按 approver_id 过滤 ticket_id，
+-- 然后按这些 id 去查工单。approver_id 列原先完全没有索引。
+--
+-- 实测证据：
+--   EXPLAIN SELECT ... FROM approval_record WHERE approver_id = 2
+--   -> type=ALL, possible_keys=NULL, rows=全表      （全表扫描）
+--
+-- 为什么原有的 idx_ticket(ticket_id, step) 不够：
+--   复合索引只能从最左列开始匹配。这条查询的过滤条件是 approver_id，
+--   压根用不上以 ticket_id 打头的索引。
+--
+-- 为什么索引里要带 action：
+--   查询同时限定 action IN ('APPROVE','REJECT')（"我审过的"不含我提交的、
+--   也不含我撤回的）。把 action 放进索引后，这两个条件都能在索引里判完，
+--   不需要为每一行回表取数据再过滤。
+--
+-- 检查是否已执行：
+--   SHOW INDEX FROM approval_record WHERE Key_name = 'idx_approver';
+-- ---------------------------------------------------------------------
+ALTER TABLE approval_record ADD KEY idx_approver (approver_id, action);
