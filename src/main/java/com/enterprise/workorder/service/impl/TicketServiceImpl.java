@@ -372,20 +372,8 @@ public class TicketServiceImpl implements TicketService {
     @Override
     public IPage<TicketVO> page(TicketQuery query) {
         LoginUser current = SecurityUtils.getLoginUser();
+        LambdaQueryWrapper<Ticket> wrapper = buildFilter(query, current);
 
-        LambdaQueryWrapper<Ticket> wrapper = new LambdaQueryWrapper<>();
-        applyScope(wrapper, query.getScope(), current);
-
-        if (StringUtils.hasText(query.getStatus())) {
-            wrapper.eq(Ticket::getStatus, requireValidStatus(query.getStatus()));
-        }
-        if (query.getTypeId() != null) {
-            wrapper.eq(Ticket::getTypeId, query.getTypeId());
-        }
-        if (StringUtils.hasText(query.getKeyword())) {
-            String kw = query.getKeyword().trim();
-            wrapper.and(w -> w.like(Ticket::getTitle, kw).or().like(Ticket::getTicketNo, kw));
-        }
         // 必须补一个 id 作为次序键。只按 created_at 排序是不稳定的：
         // 同一秒内创建的工单 created_at 完全相同（实测库里 54 行只有 17 个不同的时间戳），
         // MySQL 对并列行的返回顺序不做任何保证，且翻页时两次查询可能给出不同顺序 ——
@@ -398,6 +386,43 @@ public class TicketServiceImpl implements TicketService {
         // 用批量版本转换：先一次性查出整页需要的关联数据，再逐行填充。
         // 单个 toVO 对每行要查 4 次（类型/部门/创建人/审批人），20 行的页面就是 80 条 SQL。
         return mapPage(result);
+    }
+
+    @Override
+    public long countForExport(TicketQuery query) {
+        LoginUser current = SecurityUtils.getLoginUser();
+        Long total = ticketMapper.selectCount(buildFilter(query, current));
+        return total == null ? 0L : total;
+    }
+
+    /**
+     * 导出按 <b>id 倒序</b> 游标翻页，与列表页的 {@code created_at DESC, id DESC} 有意保持"近似但不必严格一致"。
+     *
+     * <p><b>为什么游标只用 id 一列，而不用 (created_at, id) 复合列</b>：
+     * 游标法的正确性依赖"排序键唯一且单调"，这样 {@code WHERE 排序键 < 上批末值} 才既不漏也不重。
+     * created_at 大量重复（实测库里 54 行的 created_at 只有 17 个不同取值），
+     * 拿它做游标就必须写成 {@code created_at < ? OR (created_at = ? AND id < ?)}，
+     * 而且 ticket 表在 created_at 上没有索引，每一批都要对整个符合条件的集合做 filesort，
+     * 批数一多就退化成 O(n²)。id 是自增主键，唯一、单调、天然有聚簇索引，
+     * 用它做游标每批都是主键区间扫描，代价恒定。</p>
+     *
+     * <p>代价是：若多实例部署且服务器时钟不同步，id 顺序可能与 created_at 顺序略有出入，
+     * 导出的行序和屏幕上看到的可能不完全相同。对"导出清单"这个用途而言，这是可接受的取舍。</p>
+     */
+    @Override
+    public List<TicketVO> exportBatch(TicketQuery query, Long lastId, int batchSize) {
+        LoginUser current = SecurityUtils.getLoginUser();
+        LambdaQueryWrapper<Ticket> wrapper = buildFilter(query, current);
+        if (lastId != null) {
+            wrapper.lt(Ticket::getId, lastId);
+        }
+        wrapper.orderByDesc(Ticket::getId);
+        // batchSize 是服务端常量（不是请求参数），不存在注入面。
+        // 这里必须用 last() 追加 LIMIT：若改用 Page 对象，分页插件会额外跑一次
+        // COUNT 查询，而我们在 countForExport 里已经统计过了。
+        wrapper.last("LIMIT " + batchSize);
+
+        return toVOList(ticketMapper.selectList(wrapper));
     }
 
     @Override
@@ -424,6 +449,34 @@ public class TicketServiceImpl implements TicketService {
     // ==================================================================
     //  内部方法
     // ==================================================================
+
+    /**
+     * 构造"筛选条件"部分（不含排序、不含分页）。
+     *
+     * <p>抽成独立方法是为了让列表查询与导出共用同一份条件构造逻辑。
+     * 若导出另写一份，两边迟早会分叉 —— 例如列表加了"只看某状态"的过滤，
+     * 导出忘了加，用户就会觉得"我明明筛选了，导出来却是全部"，
+     * 而且这类不一致没有任何编译期或测试能自动发现。</p>
+     *
+     * <p>权限过滤（{@link #applyScope}）也在其中，因此导出的数据范围
+     * 与用户在列表里能看到的完全一致，不可能靠导出接口越权拿到别人的单。</p>
+     */
+    private LambdaQueryWrapper<Ticket> buildFilter(TicketQuery query, LoginUser current) {
+        LambdaQueryWrapper<Ticket> wrapper = new LambdaQueryWrapper<>();
+        applyScope(wrapper, query.getScope(), current);
+
+        if (StringUtils.hasText(query.getStatus())) {
+            wrapper.eq(Ticket::getStatus, requireValidStatus(query.getStatus()));
+        }
+        if (query.getTypeId() != null) {
+            wrapper.eq(Ticket::getTypeId, query.getTypeId());
+        }
+        if (StringUtils.hasText(query.getKeyword())) {
+            String kw = query.getKeyword().trim();
+            wrapper.and(w -> w.like(Ticket::getTitle, kw).or().like(Ticket::getTicketNo, kw));
+        }
+        return wrapper;
+    }
 
     /**
      * 按查询范围过滤。

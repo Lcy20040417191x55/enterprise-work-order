@@ -10,11 +10,15 @@ import com.enterprise.workorder.dto.TicketUpdateRequest;
 import com.enterprise.workorder.dto.TicketVO;
 import com.enterprise.workorder.entity.ApprovalRecord;
 import com.enterprise.workorder.entity.Ticket;
+import com.enterprise.workorder.service.TicketExportService;
 import com.enterprise.workorder.service.TicketService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -25,6 +29,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
@@ -43,6 +50,7 @@ import java.util.List;
 public class TicketController {
 
     private final TicketService ticketService;
+    private final TicketExportService ticketExportService;
 
     @Operation(summary = "创建工单（草稿）")
     @PostMapping
@@ -98,6 +106,38 @@ public class TicketController {
     @GetMapping
     public Result<IPage<TicketVO>> page(@Valid TicketQuery query) {
         return Result.success(ticketService.page(query));
+    }
+
+    /**
+     * 导出 Excel。
+     *
+     * <p><b>为什么不返回 {@code Result<byte[]>}</b>：那样等于把整个文件先在内存里拼出来，
+     * 再交给 Spring 序列化。10 万行 xlsx 大约 20~50MB，每个导出请求都要一份这么大的
+     * 常驻内存，几个人同时点就足以把堆压满。这里直接把响应流交给导出服务，
+     * POI 边写边发，服务端内存占用与文件大小无关。</p>
+     *
+     * <p><b>返回的是文件流，不是 JSON</b>，所以前端不能用普通的接口封装去调，
+     * 必须声明 {@code responseType: 'blob'}；同时因为要带 JWT，
+     * 也不能用 {@code window.open} 直接开链接（那样带不上 Authorization 头）。</p>
+     */
+    @Operation(summary = "导出工单 Excel",
+            description = "筛选条件与列表接口完全一致（scope/status/typeId/keyword），导出的是全量而非当前页")
+    @GetMapping("/export")
+    public void export(@Valid TicketQuery query, HttpServletResponse response) throws IOException {
+        String fileName = ticketExportService.buildFileName();
+
+        // setContentType 而不是 setHeader，让 Spring 处理 charset 拼接
+        response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        // 文件名里有中文，必须 URL 编码。不编码时 Tomcat 会按 ISO-8859-1 写出响应头，
+        // 浏览器收到的文件名是乱码（表现为下载下来叫 "工单导出_xxx" 变成 "????_xxx"）。
+        // filename* 是 RFC 5987 定义的写法，现代浏览器优先读它。
+        String encoded = URLEncoder.encode(fileName, StandardCharsets.UTF_8).replace("+", "%20");
+        response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+                "attachment; filename=\"" + encoded + "\"; filename*=UTF-8''" + encoded);
+        // 让网关/代理知道这是流式响应，不要试图缓存整个文件
+        response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
+
+        ticketExportService.export(query, response.getOutputStream());
     }
 
     @Operation(summary = "工单详情")

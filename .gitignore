@@ -29,3 +29,8 @@ desktop.ini
 # 其中 20260920-backend*/src/main/resources/application-local.yml 含数据库明文密码，
 # 一旦入库就等于把密码永久写进历史，故整目录排除。
 backup/
+# ==================== 端到端测试产物 ====================
+# 导出用例生成的 xlsx 样本与断言报告都是本机跑出来的临时结果，
+# 每次执行都会覆盖，没有版本价值。
+e2e/export-out/
+e2e/*-report.txt

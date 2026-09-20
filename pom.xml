@@ -24,6 +24,7 @@
         <mybatis-plus.version>3.5.9</mybatis-plus.version>
         <jjwt.version>0.12.6</jjwt.version>
         <springdoc.version>2.6.0</springdoc.version>
+        <poi.version>5.2.5</poi.version>
     </properties>
 
     <dependencies>
@@ -87,6 +88,26 @@
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <optional>true</optional>
+        </dependency>
+
+        <!-- ==================== Excel 导出 ==================== -->
+        <!--
+          直接用 Apache POI，不再套一层 EasyExcel。
+          EasyExcel 只是 POI 的封装：它内部同样依赖 poi-ooxml，只是把"注解 + 监听器"
+          这套额外概念加到 POI 之上。本项目只导出一张固定表头的清单，
+          为这点需求多引入一层框架，代价是版本约束（EasyExcel 3.x 锁死 POI 4.x，
+          而 POI 4.x 在 JDK 17 上会被反射模块检查拦下）和更难排查的封装内异常。
+          用 POI 的 SXSSF 反而更直接，且能控制到"同时只有 N 行在内存里"。
+
+          选 SXSSF（Streaming Usable）而不是 XSSF：
+            - XSSF 把整个工作表保留在内存，10 万行 × 15 列约需数百 MB，容易 OOM；
+            - SXSSF 只保留最近 N 行（构造参数），更早的行写到磁盘临时文件，
+              内存占用与总行数无关。这是"导出全量"场景的正确选择。
+        -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>${poi.version}</version>
         </dependency>
 
         <!-- ==================== 接口文档 (Swagger UI) ==================== -->

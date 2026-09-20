@@ -53,4 +53,29 @@ public interface TicketService {
 
     /** 工单的审批轨迹，按发生顺序返回 */
     List<ApprovalRecord> history(Long ticketId);
+
+    /**
+     * 导出前的准备：校验查询条件，并统计符合条件的总行数。
+     *
+     * <p>之所以要单独有一个"统计"步骤，是因为 Excel 的截断提示必须写在表头下方、
+     * 数据上方，而 SXSSF 流式写出的行无法再回头插入 —— 所以"是否被截断"必须在
+     * 开始写第一行之前就知道。</p>
+     *
+     * <p>同时这一步也是导出接口的"校验关口"：查询条件非法（如 scope 拼错）会在这里抛异常。
+     * 此时调用方还没有碰 HttpServletResponse 的输出流，错误能被正常转成 JSON 返回。</p>
+     */
+    long countForExport(TicketQuery query);
+
+    /**
+     * 取一批导出数据（游标翻页）。
+     *
+     * <p><b>为什么不用 IPage 翻页</b>：{@code LIMIT 100000, 1000} 这种深分页，
+     * MySQL 要先扫过并丢弃前 100000 行，越翻越慢，是典型的 O(n²)。
+     * 游标法（{@code WHERE id < 上一批最后一个 id}）每批都直接走主键区间，
+     * 耗时恒定，且不会因为"翻页期间有新数据插入"而漏行或重复。</p>
+     *
+     * @param lastId    上一批最后一行的 id；首批传 null
+     * @param batchSize 每批行数
+     */
+    List<TicketVO> exportBatch(TicketQuery query, Long lastId, int batchSize);
 }
