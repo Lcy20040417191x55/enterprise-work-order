@@ -1,8 +1,12 @@
 package com.enterprise.workorder.service;
 
 import com.enterprise.workorder.common.BusinessException;
+import com.enterprise.workorder.dto.TicketCreateRequest;
 import com.enterprise.workorder.dto.TicketTypeSaveRequest;
+import com.enterprise.workorder.entity.Ticket;
 import com.enterprise.workorder.entity.TicketType;
+import com.enterprise.workorder.support.AuthTestSupport;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -22,15 +26,26 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 直到某天有人提交该类工单才报"审批链配置有误"，那时管理员早已忘记自己改过什么。
  * 这些用例把"错误必须在保存这一刻就被拦住"固化下来。</p>
  *
- * <p>@Transactional 回滚，不污染开发数据。</p>
+ * <p>@Transactional 回滚，不污染开发数据。用例自己造出所需的前提数据，
+ * 不依赖库里"恰好有什么" —— 见 {@code Delete#shouldRejectDeleteWhenReferenced} 的说明。</p>
  */
 @SpringBootTest
 @Transactional
 @DisplayName("工单类型配置")
 class TicketTypeServiceTest {
 
+    private static final long UID_ZHANGSAN = 2L;
+
     @Autowired
     private TicketTypeService ticketTypeService;
+
+    @Autowired
+    private TicketService ticketService;
+
+    @AfterEach
+    void tearDown() {
+        AuthTestSupport.logout();
+    }
 
     // ==================================================================
     //  查询
@@ -218,12 +233,21 @@ class TicketTypeServiceTest {
         /**
          * 工单表只存 type_id。若类型被删，历史工单"这是什么类型的单"就永久丢失，
          * 列表页类型名变空白，审批链也再也算不出来。所以正解是"停用"而非"删除"。
+         *
+         * <p><b>为什么引用关系必须由用例自己造</b>：这条原先直接删种子类型 1（LEAVE），
+         * 断言"它被工单引用所以删不掉"。这等于把"此刻库里恰好有用到 LEAVE 的工单"
+         * 当成了断言前提 —— 而 ticket 表是可以被清空的（重跑 sql/schema.sql 就会，
+         * 脚本开头是 DROP TABLE IF EXISTS ticket）。表一空，类型 1 便无人引用，
+         * 删除成功，用例就以"期望抛异常但没有"失败：<b>代码没错，是用例自己站不稳</b>。
+         * 现在由用例自己造出这条引用关系，无论库里有没有历史数据，结论都一致。</p>
          */
         @Test
         @DisplayName("已被工单引用的类型不能删除，并提示改用停用")
         void shouldRejectDeleteWhenReferenced() {
-            // 类型 1 = LEAVE，库里有工单在用
-            assertThatThrownBy(() -> ticketTypeService.delete(1L))
+            TicketType referenced = createType("TEST_REF", "测试-被引用", "DEPT_LEADER", 71, 1);
+            createTicketUsing(referenced.getId());
+
+            assertThatThrownBy(() -> ticketTypeService.delete(referenced.getId()))
                     .isInstanceOf(BusinessException.class)
                     .hasMessageContaining("不能删除")
                     .hasMessageContaining("停用");
@@ -245,6 +269,21 @@ class TicketTypeServiceTest {
 
     private TicketType createType(String code, String name, String flow, int sort, Integer enabled) {
         return ticketTypeService.create(request(code, name, flow, sort, enabled));
+    }
+
+    /**
+     * 造一张引用指定类型的工单，用来制造"该类型已被引用"这个前提。
+     *
+     * <p>走真实的 {@link TicketService#create} 而不是直接 INSERT：用例不必知道 ticket
+     * 表有哪些非空列，列改名或加列时也不会悄悄失效。建出来的数据同样随事务回滚。</p>
+     */
+    private Ticket createTicketUsing(Long typeId) {
+        AuthTestSupport.loginAs(UID_ZHANGSAN);
+        TicketCreateRequest create = new TicketCreateRequest();
+        create.setTitle("类型删除用例的引用工单");
+        create.setContent("由 TicketTypeServiceTest 创建，事务结束后回滚");
+        create.setTypeId(typeId);
+        return ticketService.create(create);
     }
 
     private TicketTypeSaveRequest request(String code, String name, String flow,
