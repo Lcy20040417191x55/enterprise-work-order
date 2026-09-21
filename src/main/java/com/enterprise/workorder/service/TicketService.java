@@ -64,6 +64,30 @@ public interface TicketService {
      */
     void requireVisible(Long ticketId);
 
+    /**
+     * 取工单并校验可见性，一次调用同时完成"取数据"和"验权限"。
+     *
+     * <p>与 {@link #requireVisible} 的关系：那个只验权限、不返回东西，适合"我只要知道
+     * 你能不能看"的场景（评论列表）；本方法额外把工单实体交给调用方，适合调用方
+     * 还需要读工单字段的场景（附件列表要用 status 决定删除按钮显不显示）。
+     * 两者共用同一份 {@code requireViewPermission} 实现，不会分叉。</p>
+     */
+    Ticket getVisibleTicket(Long ticketId);
+
+    /**
+     * 取工单并校验"当前登录人可以往这张单上增删附件"，不满足时抛 403 / 1001。
+     *
+     * <p>三个条件依次是：工单存在且可见、状态允许增删附件（未办结）、
+     * 当前人是这张单的参与人（创建人或当前待办人）。</p>
+     *
+     * <p><b>为什么这个方法要放在 TicketService 而不是附件服务里</b>：
+     * "谁算这张单的参与人"是工单的领域知识，附件、评论、后续任何挂载物都该复用。
+     * 一旦附件服务自己写一份 {@code creatorId == me || currentApproverId == me}，
+     * 将来工单加了"协作人"字段，附件这边就会默默漏掉这类人 —— 而漏的是权限，
+     * 症状是"有人传不了文件"，或者更糟：本该拦住的人被放进来了。</p>
+     */
+    Ticket requireAttachable(Long ticketId);
+
     /** 工单的审批轨迹，按发生顺序返回 */
     List<ApprovalRecord> history(Long ticketId);
 

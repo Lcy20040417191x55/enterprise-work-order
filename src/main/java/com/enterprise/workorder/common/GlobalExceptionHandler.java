@@ -17,6 +17,8 @@ import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartException;
 import org.springframework.web.servlet.NoHandlerFoundException;
 
 import java.util.stream.Collectors;
@@ -127,6 +129,43 @@ public class GlobalExceptionHandler {
         log.warn("缺少请求参数: {}", e.getParameterName());
         return build(HttpStatus.BAD_REQUEST, ResultCode.BAD_REQUEST,
                 "缺少必填参数 " + e.getParameterName());
+    }
+
+    // ==================================================================
+    //  文件上传
+    // ==================================================================
+
+    /**
+     * 上传体积超过 spring.servlet.multipart.max-file-size。
+     *
+     * <p><b>为什么这条要专门处理</b>：这个异常在请求体进入 Controller 之前就被抛出，
+     * 属于"框架层拦截"。若不接管，它会落进兜底分支变成 500 + "系统繁忙"，
+     * 而用户其实只是传了个大文件 —— 把客户端问题报成服务端故障，
+     * 既误导用户（以为系统坏了，反复重试），也污染监控告警。</p>
+     *
+     * <p>提示里刻意<b>不带具体数字上限</b>：框架异常里拿不到配置值，
+     * 写死一个数字则会在配置调整后变成假消息。真正带数字的提示在业务层
+     * （见 TicketAttachmentServiceImpl#upload），那条只在 20MB~25MB 这个窄区间外
+     * 才会被本分支抢先生效。用户看到的话术略有差异，但不会拿到错误的数字。</p>
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<Result<Void>> handleMaxUploadSize(MaxUploadSizeExceededException e) {
+        log.warn("上传文件超过框架限制: {}", e.getMessage());
+        return build(HttpStatus.PAYLOAD_TOO_LARGE, ResultCode.BAD_REQUEST, "文件过大，请压缩后重试");
+    }
+
+    /**
+     * multipart 请求本身有问题：请求体被截断、boundary 缺失或格式非法。
+     *
+     * <p>与上一条的关系：MaxUploadSizeExceededException 是它的子类，
+     * Spring 会优先匹配更具体的那个，所以正常超限走上面的分支，
+     * 这条接住的是"请求根本不是合法的 multipart"。</p>
+     */
+    @ExceptionHandler(MultipartException.class)
+    public ResponseEntity<Result<Void>> handleMultipart(MultipartException e) {
+        log.warn("multipart 请求解析失败: {}", e.getMessage());
+        return build(HttpStatus.BAD_REQUEST, ResultCode.BAD_REQUEST,
+                "上传请求格式错误，请重新选择文件后再试");
     }
 
     // ==================================================================

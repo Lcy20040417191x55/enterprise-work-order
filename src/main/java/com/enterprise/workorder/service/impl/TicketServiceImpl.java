@@ -470,6 +470,51 @@ public class TicketServiceImpl implements TicketService {
     }
 
     /**
+     * 取工单 + 验可见性。
+     *
+     * <p>抽出来的动机很具体：附件列表要展示每一行"你能不能删"，
+     * 而这取决于工单状态。若不提供本方法，调用方只能 {@code detail(ticketId)} 再取 status，
+     * 而 detail 会顺带把所有名字映射、部门、类型都查一遍 —— 为了一个 status 字段
+     * 付出一次完整详情组装的代价，纯属浪费。</p>
+     */
+    @Override
+    public Ticket getVisibleTicket(Long ticketId) {
+        Ticket ticket = requireTicket(ticketId);
+        requireViewPermission(ticket);
+        return ticket;
+    }
+
+    /**
+     * 取工单 + 校验"当前人可以往这张单上增删附件"。
+     *
+     * <p>校验顺序刻意是"先粗后细"：可见性 -> 状态 -> 参与人身份。
+     * 顺序换过来（先判断"我是不是参与人"）会造成信息泄露：
+     * 对一个无权查看这张单的人，错误提示会从"无权查看"变成"你不是参与人"，
+     * 后者等于确认了"这张单确实存在、而且有个当前待办人"。</p>
+     *
+     * <p><b>为什么参与人是"创建人 + 当前待办人"两方</b>：审批过程中补材料是双向的 ——
+     * 申请人补发票，审批人回传一份签批扫描件。少了任何一方，另一方就只能走线下渠道，
+     * 而线下流转的材料不会留在工单里，复盘时等于没有。</p>
+     */
+    @Override
+    public Ticket requireAttachable(Long ticketId) {
+        Ticket ticket = getVisibleTicket(ticketId);
+        TicketStatus status = parseStatus(ticket.getStatus());
+        if (!status.isAttachable()) {
+            throw new BusinessException("工单" + status.getLabel() + "，不能增删附件");
+        }
+        LoginUser current = SecurityUtils.getLoginUser();
+        Long uid = current.getUserId();
+        if (!ticket.getCreatorId().equals(uid) && !uid.equals(ticket.getCurrentApproverId())) {
+            // 走到这里说明我能看到这张单（例如我审批过、或者是管理员），
+            // 但我既不是申请人也不是当前待办人 —— 此时不该再往里加东西
+            throw new BusinessException(ResultCode.FORBIDDEN,
+                    "只有工单创建人和当前审批人可以增删附件");
+        }
+        return ticket;
+    }
+
+    /**
      * 取当前登录人的显示名。
      *
      * <p>通知里的"{谁}提交了工单"需要一个稳定的名字。优先用 sys_user.real_name，

@@ -29,6 +29,19 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://127.0.0.1:3306/enterprise_work_order?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
     username: root
+  servlet:
+    multipart:
+      # 【这两个值与业务上限 20MB 的关系，是本项目唯一一处刻意"两套数字"的地方】
+      # Spring 这层的限制在进入 Controller 之前生效，抛的是 MaxUploadSizeExceededException，
+      # 它的文案由框架生成，拿不到具体数字，用户只能看到一句"文件过大"。
+      # 因此这里刻意放宽到 25MB，让 20MB~25MB 之间的请求能进到业务层，
+      # 由 TicketAttachmentServiceImpl 给出"你传了 24.3MB，上限 20MB"这样的提示。
+      # 而真正的恶意大文件（例如 5GB）仍会被这一层直接掐断，
+      # 不会先落盘再报错，白占磁盘和带宽。
+      max-file-size: 25MB
+      # 整个 multipart 请求的上限要再大一些：除文件本身还有表单项、分隔符和头部开销。
+      # 两者设成相等时，接近上限的文件会因为这点开销而被误判为请求过大。
+      max-request-size: 30MB
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
     time-zone: Asia/Shanghai
@@ -62,6 +75,38 @@ springdoc:
 # =====================================================================
 # 工单导出
 workorder:
+  # -------------------------------------------------------------------
+  #  工单附件
+  # -------------------------------------------------------------------
+  attachment:
+    # 存储根目录。相对路径按进程工作目录解析（IDEA 里跑就是项目根目录）。
+    # 刻意不放在系统临时目录：临时目录会被操作系统定期清理，
+    # 文件无声消失而数据库记录还在，用户点下载得到 404 且查不出原因。
+    storage-root: data/attachments
+    # 单个文件业务上限。前端提示、后端校验都以它为准，Spring 那层刻意设得更大。
+    max-size: 20MB
+    # 允许的扩展名（不含点）。
+    # 白名单而不是黑名单：黑名单永远列不全（今天想到 exe，明天冒出 chm、lnk、scf），
+    # 漏一个就是一个洞；白名单的失败方式是"用户抱怨传不了某类文件"，是可发现的。
+    # 刻意不含 html / svg / js：这三类即使只作为附件下载，浏览器也可能渲染并执行脚本。
+    allowed-extensions:
+      - pdf
+      - doc
+      - docx
+      - xls
+      - xlsx
+      - ppt
+      - pptx
+      - txt
+      - csv
+      - png
+      - jpg
+      - jpeg
+      - gif
+      - bmp
+      - zip
+      - rar
+      - 7z
   export:
     # 单次导出的最大行数。超过后只导出最新的这么多行，并在文件首行写明被截断。
     # 默认 100000，这里显式写出来是为了让它可被检索到 —— 只在 @Value 里写默认值时，

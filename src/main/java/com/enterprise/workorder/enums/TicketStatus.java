@@ -121,6 +121,26 @@ public enum TicketStatus {
     }
 
     /**
+     * 是否允许增删附件。
+     *
+     * <p><b>为什么办结后必须冻结附件</b>：附件是"审批时看到的材料"的凭证。
+     * APPROVED 之后若还能往单子里塞文件或删文件，事后复盘时"审批人当时依据的是哪份材料"
+     * 就无从确认了 —— 争议往往几个月后才出现，而附件目录已经被人悄悄改过。
+     * 审批中（PENDING）反而必须允许增删：审批人需要申请人补一张发票扫描件，
+     * 这是最常见的沟通内容，冻结它就等于逼着双方走线下邮件。</p>
+     *
+     * <p>与 {@link #isEditable} 的区别值得注意：REJECTED 单据的内容可改、
+     * 附件也可增删（补材料再提交）；但 PENDING 单据内容不可改、附件却可以。
+     * 两者不是同一组状态，这正是不能复用 isEditable 的原因。</p>
+     */
+    public boolean isAttachable() {
+        return switch (this) {
+            case DRAFT, PENDING, REJECTED, WITHDRAWN -> true;
+            case APPROVED, CLOSED -> false;
+        };
+    }
+
+    /**
      * 是否可撤回。
      *
      * <p>只有审批中的单需要撤回 —— 都还没交出去，或者已经办结，撤回无从谈起。</p>
