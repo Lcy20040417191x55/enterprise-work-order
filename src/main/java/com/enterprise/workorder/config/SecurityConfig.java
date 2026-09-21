@@ -91,6 +91,10 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.DELETE, "/api/ticket-types/*").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.GET, "/api/ticket-types/all").hasRole("ADMIN")
 
+                        // 用户与部门管理是管理员专属的配置操作
+                        .requestMatchers("/api/users/**").hasRole("ADMIN")
+                        .requestMatchers("/api/departments/**").hasRole("ADMIN")
+
                         // 删除工单是不可逆动作（虽是逻辑删除，但列表、详情、轨迹均不可见），
                         // 仅创建人本人可做，由 Service 校验；这里不再叠加角色限制，
                         // 因为普通员工也需要能删掉自己刚建错的草稿。

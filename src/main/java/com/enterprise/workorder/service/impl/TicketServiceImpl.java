@@ -26,6 +26,7 @@ import com.enterprise.workorder.mapper.TicketTypeMapper;
 import com.enterprise.workorder.security.LoginUser;
 import com.enterprise.workorder.security.SecurityUtils;
 import com.enterprise.workorder.service.ApprovalFlowResolver;
+import com.enterprise.workorder.service.NotificationService;
 import com.enterprise.workorder.service.TicketService;
 import com.enterprise.workorder.service.UserService;
 import lombok.RequiredArgsConstructor;
@@ -98,6 +99,15 @@ public class TicketServiceImpl implements TicketService {
     private final UserService userService;
     private final ApprovalFlowResolver approvalFlowResolver;
 
+    /**
+     * 通知服务。
+     *
+     * <p>注意这里注入的不是 Mapper 而是 Service：写通知要判断收件人，
+     * 收件人规则（创建人 + 当前待办人 + 历史审批人，去重且排除评论人）
+     * 只应该存在于通知服务内部。若工单服务自己拼收件人列表，规则就会有两份。</p>
+     */
+    private final NotificationService notificationService;
+
     // ==================================================================
     //  创建
     // ==================================================================
@@ -164,6 +174,13 @@ public class TicketServiceImpl implements TicketService {
         ticketMapper.updateById(ticket);
 
         writeRecord(ticket, 0, current, ApprovalAction.SUBMIT, null);
+
+        // 通知当前待办人。放在 writeRecord 之后，是为了让审批轨迹先落库 ——
+        // 两者同事务，顺序不影响最终一致性，但若通知插入抛异常（例如列宽越界），
+        // 日志里能先看到轨迹已写入，排查时更容易定位是通知环节出的问题。
+        notificationService.notifyTodo(ticket.getId(), chain.get(0),
+                ticket.getTicketNo(), ticket.getTitle(), "由 " + displayName(current) + " 提交");
+
         log.info("工单 {} 已提交，共 {} 级审批，当前审批人 {}",
                 ticket.getTicketNo(), chain.size(), chain.get(0));
     }
@@ -211,6 +228,8 @@ public class TicketServiceImpl implements TicketService {
             ticketMapper.updateById(ticket);
 
             writeRecord(ticket, approverStep, current, ApprovalAction.REJECT, trimmedComment);
+            notificationService.notifyRejected(ticket.getId(), ticket.getCreatorId(),
+                    ticket.getTicketNo(), ticket.getTitle(), trimmedComment);
             log.info("工单 {} 被 {} 驳回", ticket.getTicketNo(), current.getUsername());
             return;
         }
@@ -222,6 +241,8 @@ public class TicketServiceImpl implements TicketService {
             ticket.setCurrentApproverId(null);
             ticket.setFinishedAt(LocalDateTime.now());
             ticketMapper.updateById(ticket);
+            notificationService.notifyApproved(ticket.getId(), ticket.getCreatorId(),
+                    ticket.getTicketNo(), ticket.getTitle());
             log.info("工单 {} 审批完成，全部通过", ticket.getTicketNo());
         } else {
             int nextStep = ticket.getCurrentStep() + 1;
@@ -242,6 +263,10 @@ public class TicketServiceImpl implements TicketService {
             // 链可能因主数据变化而变短，totalStep 要跟着修正，否则详情页会显示"第 3/2 级"
             ticket.setTotalStep(chain.size());
             ticketMapper.updateById(ticket);
+            // 流转到下一级时通知新的待办人。上一级审批人不需要通知 ——
+            // 他自己刚点的通过，不需要系统再告诉他"你点过了"。
+            notificationService.notifyTodo(ticket.getId(), ticket.getCurrentApproverId(),
+                    ticket.getTicketNo(), ticket.getTitle(), "已通过上一级审批");
             log.info("工单 {} 第 {} 级通过，流转至第 {} 级，审批人 {}",
                     ticket.getTicketNo(), nextStep - 1, nextStep, ticket.getCurrentApproverId());
         }
@@ -430,6 +455,32 @@ public class TicketServiceImpl implements TicketService {
         Ticket ticket = requireTicket(ticketId);
         requireViewPermission(ticket);
         return toVO(ticket);
+    }
+
+    /**
+     * 只做可见性校验，不组装详情。
+     *
+     * <p>评论、后续可能的附件/操作日志都要挂在"能看这张工单"这个前提上。
+     * 与其让每个调用方各自复制 {@code requireViewPermission} 的逻辑，
+     * 不如把校验本身暴露出去；规则仍然只有 {@link #requireViewPermission} 一份实现。</p>
+     */
+    @Override
+    public void requireVisible(Long ticketId) {
+        requireViewPermission(requireTicket(ticketId));
+    }
+
+    /**
+     * 取当前登录人的显示名。
+     *
+     * <p>通知里的"{谁}提交了工单"需要一个稳定的名字。优先用 sys_user.real_name，
+     * 查不到（用户被删或数据异常）时回落到登录名，最差也不会返回 null 让文案变成
+     * "null 提交了工单"。</p>
+     */
+    private String displayName(LoginUser current) {
+        SysUser user = userService.getById(current.getUserId());
+        return user != null && StringUtils.hasText(user.getRealName())
+                ? user.getRealName()
+                : current.getUsername();
     }
 
     @Override

@@ -139,7 +139,10 @@ class ApprovalFlowResolverTest {
         @Test
         @DisplayName("整个部门树都没有主管时，回落管理员代审，而不是拒绝提交")
         void shouldFallBackToAdminWhenNoLeaderAnywhere() {
-            // 财务部及其上级（总公司）都没有主管
+            // 财务部及其上级（总公司）都没有主管。
+            // 这里显式清空而不是"假设种子数据里恰好没填"：开发库被手工改过主管后，
+            // 用例要么假通过要么假失败，排查成本远高于这几行准备代码。
+            clearLeadersAlongTrace(DEPT_FINANCE);
             List<Long> chain = resolver.resolveChain("DEPT_LEADER", DEPT_FINANCE, NOBODY);
 
             assertThat(chain).containsExactly(UID_ADMIN);
@@ -184,6 +187,7 @@ class ApprovalFlowResolverTest {
         @Test
         @DisplayName("没有可选审批人时，报错要指出具体部门，而不是笼统的「请检查配置」")
         void shouldReportUnresolvableDepartmentId() {
+            clearLeadersAlongTrace(DEPT_FINANCE);
             disableAllAdmins();
 
             assertThatThrownBy(() -> resolver.resolveChain("DEPT_LEADER", DEPT_FINANCE, NOBODY))
@@ -224,6 +228,35 @@ class ApprovalFlowResolverTest {
         department.setSort(99);
         departmentMapper.insert(department);
         return department;
+    }
+
+    /**
+     * 把某个部门及其所有上级部门的主管清空，构造"整棵部门树都没有主管"的场景。
+     *
+     * <p><b>为什么必须显式清空</b>：审批链解析会沿 parent_id 向上找主管。
+     * 只要有任意一级配了主管，DEPT_LEADER 就能解析出人，用例想验证的
+     * "解析不到人该报错"这条分支根本走不到。而这些主管字段是开发过程中
+     * 随时会被手工/界面改动的数据，把断言的成立前提押在"库里恰好是种子数据"上，
+     * 会得到时而通过时而失败的用例。</p>
+     *
+     * <p>改动落在事务里，用例结束自动回滚，不影响开发数据。</p>
+     */
+    private void clearLeadersAlongTrace(Long departmentId) {
+        Long currentId = departmentId;
+        for (int depth = 0; depth < 10 && currentId != null && currentId != 0L; depth++) {
+            Department department = departmentMapper.selectById(currentId);
+            if (department == null) {
+                return;
+            }
+            if (department.getLeaderId() != null) {
+                // 必须走 UpdateWrapper 显式 set(null)：MyBatis-Plus 的 updateById
+                // 默认跳过 null 字段（FieldStrategy.NOT_NULL），传实体进去清不掉主管。
+                departmentMapper.update(null, new LambdaUpdateWrapper<Department>()
+                        .eq(Department::getId, department.getId())
+                        .set(Department::getLeaderId, null));
+            }
+            currentId = department.getParentId();
+        }
     }
 
     /** 停用全部管理员，用来验证"一个人都派不出来"时的行为。测试结束由事务回滚 */

@@ -51,6 +51,19 @@ public interface TicketService {
     /** 工单详情 */
     TicketVO detail(Long ticketId);
 
+    /**
+     * 校验当前登录人是否有权查看该工单，无权时抛 403。
+     *
+     * <p>对外暴露这个方法而不是让调用方自己 {@code detail(id) != null} 判断，
+     * 是为了让"评论、附件、操作日志"这类后续挂到工单上的功能都复用它 ——
+     * 可见性规则只能有一份实现，写第二份就一定会分叉。</p>
+     *
+     * <p>与 {@code detail} 的分工：{@code detail} 是"取数据"，本方法是"只验权限"。
+     * 评论接口不需要详情 VO，若为了借用权限校验而拉一次完整详情并组装名字映射，
+     * 属于纯粹的资源浪费。</p>
+     */
+    void requireVisible(Long ticketId);
+
     /** 工单的审批轨迹，按发生顺序返回 */
     List<ApprovalRecord> history(Long ticketId);
 
