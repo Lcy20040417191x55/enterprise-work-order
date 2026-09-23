@@ -66,13 +66,84 @@ public class OpenAiCompatibleClient implements LlmClient {
                     "智能助手未配置：请在 application-local.yml 中填写 app.llm.api-key");
         }
 
+        Map<String, Object> body = buildRequestBody(messages, tools, forcedToolName);
+
+        return parse(postWithRetry(body));
+    }
+
+    /**
+     * 发送请求，并在 429 / 5xx 时重试。
+     *
+     * <p><b>为什么重试要写在这里而不是让用户自己重试</b>：
+     * 免费模型的 429 是瞬时拥堵，几秒后就好；而用户重试意味着重新输入、
+     * 重新等待，且他无法知道该等多久。在服务端自动重试对用户是透明的。</p>
+     *
+     * <p>只重试 429 与 5xx：401/402/400 重试多少次结果都一样，只会让用户多等。</p>
+     */
+    private String postWithRetry(Map<String, Object> body) {
+        int maxRetries = Math.max(0, properties.getMaxRetries());
+        for (int attempt = 0; ; attempt++) {
+            try {
+                return restClient.post()
+                        .uri(properties.chatCompletionsUrl())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + properties.getApiKey())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(body)
+                        .retrieve()
+                        .body(String.class);
+            } catch (RestClientResponseException e) {
+                int status = e.getStatusCode().value();
+                if (isRetryable(status) && attempt < maxRetries) {
+                    log.warn("大模型返回 {}，第 {}/{} 次重试", status, attempt + 1, maxRetries);
+                    sleepBeforeRetry(attempt);
+                    continue;
+                }
+                throw translate(e);
+            } catch (Exception e) {
+                // 连接超时、DNS 失败、读超时都会走到这里。这类错误必须给出可操作的提示，
+                // 否则用户只看到"系统繁忙"，无从判断是网络问题还是配置问题。
+                // 这里不重试：超时时服务端可能已经在生成，重发会白花一次 token。
+                log.warn("调用大模型失败: {}", e.getMessage());
+                throw new BusinessException(ResultCode.BIZ_ERROR,
+                        "智能助手暂时不可用（网络或超时），请稍后重试或手动填单");
+            }
+        }
+    }
+
+    /** 429 是免费额度拥堵，5xx 是服务端瞬时故障 —— 两者都值得再试一次 */
+    static boolean isRetryable(int status) {
+        return status == 429 || status >= 500;
+    }
+
+    /** 等待 n 倍基础间隔：线性退避比固定间隔更容易让拥堵消散 */
+    private void sleepBeforeRetry(int attempt) {
+        long millis = properties.getRetryBackoff().toMillis() * (attempt + 1L);
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException(ResultCode.BIZ_ERROR, "智能助手请求已中断");
+        }
+    }
+
+    /**
+     * 构造 chat/completions 的请求体。
+     *
+     * <p>抽成独立方法（而非留在 {@link #chat} 里），是为了能在不联网的前提下断言
+     * 「哪些字段会被发出去」。这类字段级差异 —— 多一个 thinking、少一个 tool_choice ——
+     * 的症状是「换个供应商就报 400」，用真实请求去测既慢又要依赖外部服务。</p>
+     */
+    Map<String, Object> buildRequestBody(List<Message> messages, List<ToolSpec> tools, String forcedToolName) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", properties.getModel());
         body.put("messages", toRequestMessages(messages));
         body.put("stream", false);
-        // 始终显式声明思考模式开关。该供应商默认是开启的，若只在关闭时传参，
-        // 换一家默认关闭的供应商就会行为不一致 —— 显式传值才与环境无关。
-        body.put("thinking", Map.of("type", properties.isThinking() ? "enabled" : "disabled"));
+        // thinking 是 DeepSeek 专有参数，别的 OpenAI 兼容服务不认识它，带上可能直接 400。
+        // 因此默认不发，只有显式打开 thinking-param 时才带 ——
+        // 「换供应商只改 base-url 与 model」这个承诺才真正成立。
+        if (properties.isThinkingParam()) {
+            body.put("thinking", Map.of("type", properties.isThinking() ? "enabled" : "disabled"));
+        }
         if (tools != null && !tools.isEmpty()) {
             body.put("tools", toRequestTools(tools));
             if (forcedToolName != null && !forcedToolName.isBlank()) {
@@ -82,27 +153,7 @@ public class OpenAiCompatibleClient implements LlmClient {
                         "function", Map.of("name", forcedToolName)));
             }
         }
-
-        String raw;
-        try {
-            raw = restClient.post()
-                    .uri(properties.chatCompletionsUrl())
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + properties.getApiKey())
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(body)
-                    .retrieve()
-                    .body(String.class);
-        } catch (RestClientResponseException e) {
-            throw translate(e);
-        } catch (Exception e) {
-            // 连接超时、DNS 失败、读超时都会走到这里。这类错误必须给出可操作的提示，
-            // 否则用户只看到"系统繁忙"，无从判断是网络问题还是配置问题。
-            log.warn("调用大模型失败: {}", e.getMessage());
-            throw new BusinessException(ResultCode.BIZ_ERROR,
-                    "智能助手暂时不可用（网络或超时），请稍后重试或手动填单");
-        }
-
-        return parse(raw);
+        return body;
     }
 
     /**

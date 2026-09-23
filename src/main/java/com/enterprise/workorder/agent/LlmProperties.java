@@ -51,8 +51,34 @@ public class LlmProperties {
     /** 单次请求超时。含连接与读取，取值要覆盖模型生成整段回答的时间。 */
     private Duration timeout = Duration.ofSeconds(30);
 
-    /** 是否启用思考模式。见类注释：默认关闭。 */
+    /**
+     * 429 / 5xx 时的额外重试次数。
+     *
+     * <p><b>为什么免费模型必须重试</b>：实测智谱免费模型 glm-4.5-flash 在
+     * 不同时段会有相当比例的请求直接返回 429「访问量过大」——
+     * 不重试时用户看到的是随机失败，同一个输入有时成功有时报错，
+     * 看起来像系统坏了。加两次重试后实测成功率从约一半提升到 4/5。</p>
+     *
+     * <p>只重试 429 与 5xx：401/402/400 重试多少次结果都一样，只会让用户多等。</p>
+     */
+    private int maxRetries = 2;
+
+    /** 首次重试前的等待时长；第 n 次重试等待 n 倍，避免同时涌入继续加剧拥堵 */
+    private Duration retryBackoff = Duration.ofSeconds(2);
+
+    /** 是否启用思考模式（仅在 {@link #thinkingParam} 为 true 时才发往服务端）。 */
     private boolean thinking = false;
+
+    /**
+     * 是否在请求体里携带 thinking 参数。
+     *
+     * <p><b>默认 false，因为 thinking 是 DeepSeek 专有字段。</b>
+     * 智谱、通义、Kimi、OpenAI 官方都不认识它，带上可能直接返回 400 ——
+     * 而本项目号称「换供应商只改 base-url 与 model」，若默认发送，
+     * 这个说法就不成立：换个供应商第一件事是莫名其妙地报参数错误。
+     * 需要 DeepSeek 的思考模式时才显式打开。</p>
+     */
+    private boolean thinkingParam = false;
 
     /** 工具调用的最大轮次，防止模型在两个工具之间来回调用形成死循环 */
     private int maxToolRounds = 4;

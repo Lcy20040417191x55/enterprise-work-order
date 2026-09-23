@@ -151,27 +151,46 @@ POST /api/agent/chat
 # application.yml
 app:
   llm:
-    base-url: https://api.deepseek.com
-    model: deepseek-flash
+    base-url: https://open.bigmodel.cn/api/paas/v4
+    model: glm-4.5-flash
     timeout: 30s
     thinking: false          # 本场景不需要思维链，开着只会更慢更贵
+    thinking-param: true     # 智谱的 glm-4.5-flash 默认开思考，必须显式关掉
     max-tool-rounds: 4
+    max-retries: 2           # 429/5xx 时重试（免费模型拥堵时必要）
+    retry-backoff: 2s
 
 # application-local.yml（不进版本库）
 app:
   llm:
-    api-key: sk-xxxxxxxx
+    api-key: xxxxxxxx.xxxxxxxx
 ```
 
-Key 到 [platform.deepseek.com](https://platform.deepseek.com) 注册后创建。
+Key 到 [open.bigmodel.cn](https://open.bigmodel.cn/) → API Keys 创建（形如 `xxxxxxxx.xxxxxxxx`，中间有一个点）。
 **留空时助手整体降级为不可用**（`/api/agent/status` 返回 `available=false`，前端隐藏入口），
 工单系统的其余功能完全不受影响。
 
-换供应商只改这两行配置：`base-url` 填 `https://api.openai.com/v1` 即可，
-代码里只实现了一套 OpenAI 兼容协议。
+默认用智谱免费模型，是因为它真的不花钱。换供应商只改 `base-url` 与 `model` 两行：
+代码里只实现了一套 OpenAI 兼容协议。但有一个前提必须说清楚：
 
-> 注意 DeepSeek 已换过一轮模型命名，旧教程里的 `deepseek-chat` 不在当前可用列表内，
-> 照抄会得到 400。当前可用的是 `deepseek-flash` 与 `deepseek-v4-pro`。
+### 换供应商时要注意的两件事
+
+1. **`thinking` 是 DeepSeek 专有字段，不能默认发送。**
+   智谱、通义、Kimi、OpenAI 官方都不认识它。因此它由
+   `thinking-param` 控制，默认不发；用 DeepSeek 时才改成 `true`。
+
+2. **瞄模型时，“免费”不等于“能用于本项目”。**
+   本项目强依赖工具调用（function calling）。实测智谱免费模型：
+
+   | 模型 | 工具调用成功率（各 5–6 次） | 说明 |
+   |---|---|---|
+   | `glm-4.5-flash` | 5/5 | ✓ 采用。但会间歇性 429，故需重试 |
+   | `glm-4-flash` | 5/5 | 可用，但非官方标注的免费模型 |
+   | `glm-4-flash-250414` | **0/5** | ✗ 只用文字回“我马上调用”，实际不发 `tool_calls` |
+   | `glm-4.7-flash` | 1/5 | ✗ 几乎全是 429 |
+
+   `glm-4-flash-250414` 看起来更合适（不开思考、响应快），但它就是不发工具调用，
+   而没有工具调用就没有草稿 —— 整个功能归零。这是一个不跑一遍就不会发现的坑。
 
 ## 导出 Excel
 

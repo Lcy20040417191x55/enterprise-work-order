@@ -130,17 +130,42 @@ app:
   #
   # 未配置 api-key 时，AgentService 会把助手整体降级为不可用（/api/agent/status
   # 返回 available=false），工单系统本身的功能完全不受影响 —— 它是可选的附加能力。
+  #
+  # 默认用智谱开放平台（BigModel）的免费模型。它同样是 OpenAI 兼容协议，
+  # 因此只需改下面两行即可切回 DeepSeek 或 OpenAI 官方。
   llm:
-    # OpenAI 兼容协议的地址。DeepSeek 用 https://api.deepseek.com
-    # （注意不要加 /v1，它的路由不认）；换 OpenAI 官方则填 https://api.openai.com/v1
-    base-url: https://api.deepseek.com
-    # 模型名。DeepSeek 当前可用的是 deepseek-flash（快、便宜）与 deepseek-v4-pro（强、贵）。
-    # 旧教程里的 deepseek-chat 已不在可用模型列表内，照抄会得到 400。
-    model: deepseek-flash
+    # 智谱：https://open.bigmodel.cn/api/paas/v4（路径必须带 /api/paas/v4）
+    # DeepSeek：https://api.deepseek.com（不要带 /v1，它的路由不认）
+    # OpenAI 官方：https://api.openai.com/v1
+    base-url: https://open.bigmodel.cn/api/paas/v4
+    # 智谱免费的文本模型：glm-4.5-flash、glm-4.7-flash、glm-4-flash-250414。
+    #
+    # 为什么选 glm-4.5-flash：本项目强依赖工具调用（function calling）。
+    # 本机实测（各 5 次）：
+    #   glm-4.5-flash        5/5 成功
+    #   glm-4-flash          5/5 成功
+    #   glm-4-flash-250414   0/5 —— 只用文字回“我马上调用”，finish_reason=stop，实际不发 tool_calls
+    #   glm-4.7-flash        1/5 —— 几乎全是 429（访问量过大）
+    # 250414 那个虽然不开思考、响应快，但工具调用对它就是不可靠，
+    # 而没有工具调用就没有草稿，整个功能归零。
+    model: glm-4.5-flash
     # 单次请求超时，要覆盖模型生成整段回答的时间
     timeout: 30s
-    # 思考模式。默认关闭：本场景只是把一句话填进几个字段，开着只会更慢更贵
+    # 429/5xx 时的额外重试次数。智谱免费模型实测会出现成片的 429，
+    # 不重试时用户看到的是时好时坏；加两次重试后实测成功率明显上升。
+    max-retries: 2
+    # 首次重试等待时长，第 n 次等待 n 倍（线性退避）
+    retry-backoff: 2s
+    # 思考模式：关闭。本场景只是把一句话填进几个字段，思维链既慢又按输出计费。
     thinking: false
+    # 是否在请求体里携带 thinking 参数。
+    #
+    # 这个开关不是可有可无的：智谱的 glm-4.5-flash **默认开思考模式**，
+    # 此时它把正文放在 reasoning_content 而 content 为空，
+    # 而本项目只读 content，于是用户会收到一条空回复。
+    # 所以用智谱时必须为 true，把它关掉。
+    # 用 OpenAI 官方时需改回 false（它不认识 thinking 字段，带上会 400）。
+    thinking-param: true
     # 工具调用轮次上限，防止模型在两个工具之间来回调用形成死循环
     max-tool-rounds: 4
     # 单轮最多携带的历史消息条数，防止超长历史把上下文撑爆
