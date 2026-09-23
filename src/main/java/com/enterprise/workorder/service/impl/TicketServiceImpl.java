@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.enterprise.workorder.common.BusinessException;
 import com.enterprise.workorder.common.ResultCode;
 import com.enterprise.workorder.dto.TicketCreateRequest;
+import com.enterprise.workorder.dto.TicketOpLogVO;
 import com.enterprise.workorder.dto.TicketQuery;
 import com.enterprise.workorder.dto.TicketUpdateRequest;
 import com.enterprise.workorder.dto.TicketVO;
@@ -13,20 +14,24 @@ import com.enterprise.workorder.entity.ApprovalRecord;
 import com.enterprise.workorder.entity.Department;
 import com.enterprise.workorder.entity.SysUser;
 import com.enterprise.workorder.entity.Ticket;
+import com.enterprise.workorder.entity.TicketOpLog;
 import com.enterprise.workorder.entity.TicketType;
 import com.enterprise.workorder.enums.ApprovalAction;
 import com.enterprise.workorder.enums.Priority;
 import com.enterprise.workorder.enums.RoleCode;
+import com.enterprise.workorder.enums.TicketOpAction;
 import com.enterprise.workorder.enums.TicketStatus;
 import com.enterprise.workorder.mapper.ApprovalRecordMapper;
 import com.enterprise.workorder.mapper.DepartmentMapper;
 import com.enterprise.workorder.mapper.TicketMapper;
 import com.enterprise.workorder.mapper.TicketNoSeqMapper;
+import com.enterprise.workorder.mapper.TicketOpLogMapper;
 import com.enterprise.workorder.mapper.TicketTypeMapper;
 import com.enterprise.workorder.security.LoginUser;
 import com.enterprise.workorder.security.SecurityUtils;
 import com.enterprise.workorder.service.ApprovalFlowResolver;
 import com.enterprise.workorder.service.NotificationService;
+import com.enterprise.workorder.service.TicketOpLogService;
 import com.enterprise.workorder.service.TicketService;
 import com.enterprise.workorder.service.UserService;
 import lombok.RequiredArgsConstructor;
@@ -38,6 +43,7 @@ import org.springframework.util.StringUtils;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -91,6 +97,20 @@ public class TicketServiceImpl implements TicketService {
     /** 审批意见长度上限，与 approval_record.comment 的列宽以及 DTO 上的 @Size 保持一致 */
     private static final int COMMENT_MAX_LENGTH = 500;
 
+    /**
+     * 两次催办之间的最短间隔（分钟）。
+     *
+     * <p><b>为什么催办必须有频率限制</b>：催办是一个"打扰别人"的动作。
+     * 没有限制的话，申请人遇事不决就连点几下，审批人的通知中心几秒钟内堆满同一条消息，
+     * 结果不是"更受重视"，而是审批人开始忽略所有催办 —— 这个功能就废了。
+     * 限流让每一次催办都保有一定的分量。</p>
+     *
+     * <p>30 分钟这个数值的取舍：比它短，审批人还没看到就被催第二次；
+     * 比它长，上午催了、下午真想再提醒一次就催不动了。
+     * 需要更宽松或更严格的团队，改这一个常量即可，规则只在这一处。</p>
+     */
+    private static final int URGE_MIN_INTERVAL_MINUTES = 30;
+
     private final TicketMapper ticketMapper;
     private final TicketNoSeqMapper ticketNoSeqMapper;
     private final TicketTypeMapper ticketTypeMapper;
@@ -107,6 +127,19 @@ public class TicketServiceImpl implements TicketService {
      * 只应该存在于通知服务内部。若工单服务自己拼收件人列表，规则就会有两份。</p>
      */
     private final NotificationService notificationService;
+
+    /**
+     * 操作日志服务。
+     *
+     * <p>注入 Service 而不是 {@code TicketOpLogMapper} 的理由与通知服务一致：
+     * "怎么取操作人姓名、系统动作怎么表示、detail 怎么截断"是日志自己的知识，
+     * 让每个调用方都自己拼一遍，迟早出现格式不一致的日志。
+     * 读取用的 Mapper 仍然直接注入 —— 查询没有这些规则要守。</p>
+     */
+    private final TicketOpLogService opLogService;
+
+    /** 操作日志的读取入口。写入统一走 {@link #opLogService}，读取直接查表 */
+    private final TicketOpLogMapper opLogMapper;
 
     // ==================================================================
     //  创建
@@ -139,6 +172,9 @@ public class TicketServiceImpl implements TicketService {
         ticket.setTotalStep(0);
 
         ticketMapper.insert(ticket);
+        // 创建也算一次"改动过这张单"的动作，因此进日志。
+        // 放在 insert 之后是必须的：日志要带 ticketId，而 id 由数据库自增生成。
+        opLogService.record(ticket.getId(), TicketOpAction.CREATE, "新建草稿");
         log.info("工单已创建: {} by {}", ticket.getTicketNo(), current.getUsername());
         return ticket;
     }
@@ -180,6 +216,9 @@ public class TicketServiceImpl implements TicketService {
         // 日志里能先看到轨迹已写入，排查时更容易定位是通知环节出的问题。
         notificationService.notifyTodo(ticket.getId(), chain.get(0),
                 ticket.getTicketNo(), ticket.getTitle(), "由 " + displayName(current) + " 提交");
+
+        opLogService.record(ticket.getId(), TicketOpAction.SUBMIT,
+                "提交至第 1 级审批，待 " + displayNameOfId(chain.get(0)) + " 处理");
 
         log.info("工单 {} 已提交，共 {} 级审批，当前审批人 {}",
                 ticket.getTicketNo(), chain.size(), chain.get(0));
@@ -230,6 +269,7 @@ public class TicketServiceImpl implements TicketService {
             writeRecord(ticket, approverStep, current, ApprovalAction.REJECT, trimmedComment);
             notificationService.notifyRejected(ticket.getId(), ticket.getCreatorId(),
                     ticket.getTicketNo(), ticket.getTitle(), trimmedComment);
+            opLogService.record(ticket.getId(), TicketOpAction.REJECT, trimmedComment);
             log.info("工单 {} 被 {} 驳回", ticket.getTicketNo(), current.getUsername());
             return;
         }
@@ -243,6 +283,8 @@ public class TicketServiceImpl implements TicketService {
             ticketMapper.updateById(ticket);
             notificationService.notifyApproved(ticket.getId(), ticket.getCreatorId(),
                     ticket.getTicketNo(), ticket.getTitle());
+            opLogService.record(ticket.getId(), TicketOpAction.APPROVE,
+                    buildApproveDetail(approverStep, trimmedComment, true));
             log.info("工单 {} 审批完成，全部通过", ticket.getTicketNo());
         } else {
             int nextStep = ticket.getCurrentStep() + 1;
@@ -267,6 +309,8 @@ public class TicketServiceImpl implements TicketService {
             // 他自己刚点的通过，不需要系统再告诉他"你点过了"。
             notificationService.notifyTodo(ticket.getId(), ticket.getCurrentApproverId(),
                     ticket.getTicketNo(), ticket.getTitle(), "已通过上一级审批");
+            opLogService.record(ticket.getId(), TicketOpAction.APPROVE,
+                    buildApproveDetail(approverStep, trimmedComment, false));
             log.info("工单 {} 第 {} 级通过，流转至第 {} 级，审批人 {}",
                     ticket.getTicketNo(), nextStep - 1, nextStep, ticket.getCurrentApproverId());
         }
@@ -296,6 +340,7 @@ public class TicketServiceImpl implements TicketService {
         ticketMapper.updateById(ticket);
 
         writeRecord(ticket, ticket.getCurrentStep(), current, ApprovalAction.WITHDRAW, null);
+        opLogService.record(ticket.getId(), TicketOpAction.WITHDRAW, "撤回后回到可修改状态");
         log.info("工单 {} 已撤回", ticket.getTicketNo());
     }
 
@@ -337,6 +382,7 @@ public class TicketServiceImpl implements TicketService {
         }
         ticketMapper.updateById(ticket);
 
+        opLogService.record(ticket.getId(), TicketOpAction.UPDATE, "修改标题/内容/类型/优先级");
         log.info("工单 {} 内容已修改 by {}", ticket.getTicketNo(), current.getUsername());
         return toVO(ticket);
     }
@@ -361,6 +407,10 @@ public class TicketServiceImpl implements TicketService {
         // 走逻辑删除（@TableLogic），记录仍留在库里，便于事后追溯"这条草稿存在过"。
         // MyBatis-Plus 会自动把 deleteById 翻译成 UPDATE ticket SET deleted=1。
         ticketMapper.deleteById(ticketId);
+        // 注意顺序：日志写在逻辑删除之后。日志表与工单表是两张独立的表，
+        // 工单被标为 deleted=1 不影响日志行 —— 这正是不用外键、日志独立成表的价值：
+        // 单据从界面上消失了，而"它存在过、被谁删了"这段历史仍然查得到。
+        opLogService.record(ticketId, TicketOpAction.DELETE, "删除草稿 " + ticket.getTicketNo());
         log.info("草稿 {} 已删除 by {}", ticket.getTicketNo(), current.getUsername());
     }
 
@@ -387,6 +437,7 @@ public class TicketServiceImpl implements TicketService {
         ticketMapper.updateById(ticket);
 
         writeRecord(ticket, ticket.getCurrentStep(), current, ApprovalAction.CANCEL, trimToNull(comment));
+        opLogService.record(ticket.getId(), TicketOpAction.CANCEL, trimToNull(comment));
         log.info("工单 {} 已作废 by {}", ticket.getTicketNo(), current.getUsername());
     }
 
@@ -528,6 +579,55 @@ public class TicketServiceImpl implements TicketService {
                 : current.getUsername();
     }
 
+    /**
+     * 按 id 取显示名。用于日志文案里提到"某个人"的场景（如"待 李四 处理"）。
+     *
+     * <p>取不到时返回"该审批人"而不是 null：日志是给人看的，
+     * 出现一句"待 null 处理"比含糊一点的说法糟糕得多。</p>
+     */
+    private String displayNameOfId(Long userId) {
+        if (userId == null) {
+            return "该审批人";
+        }
+        SysUser user = userService.getById(userId);
+        if (user == null || !StringUtils.hasText(user.getRealName())) {
+            return "该审批人";
+        }
+        return user.getRealName();
+    }
+
+    /**
+     * 拼接"通过"这条日志的说明文字。
+     *
+     * <p>把级次与是否终审一起写进 detail，是因为详情页的时间线只展示日志本身 ——
+     * 若只写"审批通过"，用户看到连续三条一模一样的记录，无法判断哪一条是最后定案的那次。
+     * 级次信息在这里给出，时间线不必再去关联别处取。</p>
+     */
+    private String buildApproveDetail(int approverStep, String comment, boolean lastStep) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("第 ").append(approverStep).append(" 级通过");
+        if (lastStep) {
+            sb.append("，流程办结");
+        }
+        if (comment != null) {
+            sb.append("：").append(comment);
+        }
+        return sb.toString();
+    }
+
+    /** 操作日志实体转 VO。操作人姓名在写入时已固化为快照，这里不需要再查库 */
+    private TicketOpLogVO toOpLogVO(TicketOpLog opLog) {
+        TicketOpLogVO vo = new TicketOpLogVO();
+        vo.setId(opLog.getId());
+        vo.setOperatorId(opLog.getOperatorId());
+        vo.setOperatorName(opLog.getOperatorName());
+        vo.setAction(opLog.getAction());
+        vo.setActionLabel(TicketOpAction.labelOf(opLog.getAction()));
+        vo.setDetail(opLog.getDetail());
+        vo.setCreatedAt(opLog.getCreatedAt());
+        return vo;
+    }
+
     @Override
     public List<ApprovalRecord> history(Long ticketId) {
         Ticket ticket = requireTicket(ticketId);
@@ -540,6 +640,75 @@ public class TicketServiceImpl implements TicketService {
         return approvalRecordMapper.selectList(new LambdaQueryWrapper<ApprovalRecord>()
                 .eq(ApprovalRecord::getTicketId, ticketId)
                 .orderByAsc(ApprovalRecord::getId));
+    }
+
+    @Override
+    public List<TicketOpLogVO> opLogs(Long ticketId) {
+        Ticket ticket = requireTicket(ticketId);
+        requireViewPermission(ticket);
+        // 与 history 同理按主键（插入顺序）排序，不能按 created_at 排：
+        // 同一秒内的多条日志时间戳完全相同，MySQL 对并列行的顺序不做保证，
+        // 于是"提交"可能显示在"创建"前面。id 自增，天然等于发生顺序。
+        return opLogMapper.selectList(new LambdaQueryWrapper<TicketOpLog>()
+                        .eq(TicketOpLog::getTicketId, ticketId)
+                        .orderByAsc(TicketOpLog::getId))
+                .stream()
+                .map(this::toOpLogVO)
+                .toList();
+    }
+
+    /**
+     * 催办。
+     *
+     * <p><b>为什么催办要走 {@code requireTicketForUpdate} 拿行锁</b>：它本身不改工单状态，
+     * 看起来只需要读。但它要读"最近一次催办时间"再决定能不能催 —— 这是一次典型的
+     * "读-判断-写"竞争：两个请求同时进来、同时读到"上次催办是 40 分钟前"、
+     * 于是双双通过校验，各写一条日志、各发一条通知。限流也就形同虚设了。
+     * 拿行锁把这张单的并发操作串行化，第二个请求会阻塞到第一个提交，
+     * 此时它读到的是已经更新过的时间，限流才真正生效。</p>
+     *
+     * <p><b>催办不改工单的任何字段</b>：它只做两件事 —— 留一条日志（谁催的、什么时候），
+     * 推一条通知给当前待办人。状态、级次、待办人一律不动，
+     * 因为催办的效果是"让那个人知道"，不是改变流程的任何一步。</p>
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void urge(Long ticketId, String reason) {
+        LoginUser current = SecurityUtils.getLoginUser();
+        Ticket ticket = requireTicketForUpdate(ticketId);
+        requireCreator(ticket, current, "只能催办自己创建的工单");
+
+        TicketStatus status = parseStatus(ticket.getStatus());
+        if (!status.isUrgeable()) {
+            throw new BusinessException("当前状态为「" + status.getLabel() + "」，不能催办。"
+                    + "只有审批中的工单可以催办");
+        }
+
+        String trimmedReason = trimToNull(reason);
+
+        // 频率限制。放在状态校验之后：状态不符才是更根本的问题
+        // （"这张单根本没人可催"），应当优先告诉用户。
+        LocalDateTime lastUrgeAt = opLogService.lastUrgeAt(ticketId);
+        if (lastUrgeAt != null) {
+            long minutes = ChronoUnit.MINUTES.between(lastUrgeAt, LocalDateTime.now());
+            // 用 < 而不是 <=：恰好 30 分钟整时应当放行。
+            // 写成 <= 会让"等了整整半小时"的人被拒绝，而报错里显示"已过 30 分钟"，
+            // 看起来像 bug。
+            if (minutes < URGE_MIN_INTERVAL_MINUTES) {
+                throw new BusinessException("距上次催办仅 " + Math.max(minutes, 0)
+                        + " 分钟，请 " + URGE_MIN_INTERVAL_MINUTES + " 分钟后再催");
+            }
+        }
+
+        String approverName = displayNameOfId(ticket.getCurrentApproverId());
+        opLogService.record(ticketId, TicketOpAction.URGE,
+                "催办给 " + approverName + (trimmedReason == null ? "" : "：" + trimmedReason));
+
+        notificationService.notifyUrge(ticket.getId(), ticket.getCurrentApproverId(),
+                ticket.getTicketNo(), ticket.getTitle(), displayName(current), trimmedReason);
+
+        log.info("工单 {} 被 {} 催办，待办人 {}", ticket.getTicketNo(),
+                current.getUsername(), ticket.getCurrentApproverId());
     }
 
     // ==================================================================
@@ -986,6 +1155,7 @@ public class TicketServiceImpl implements TicketService {
             vo.setWithdrawable(false);
             vo.setCancelable(false);
             vo.setApprovable(false);
+            vo.setUrgeable(false);
             vo.setCurrentApprover(false);
             return;
         }
@@ -996,6 +1166,7 @@ public class TicketServiceImpl implements TicketService {
         vo.setWithdrawable(status.isWithdrawable());
         vo.setCancelable(status.isCancelable());
         vo.setApprovable(status.isApprovable());
+        vo.setUrgeable(status.isUrgeable());
 
         // 待办人判断要与"能审批"分开：只有两者同时为真，前端才该显示审批按钮
         LoginUser current = SecurityUtils.getLoginUserOrNull();

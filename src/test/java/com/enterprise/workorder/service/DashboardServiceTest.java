@@ -403,7 +403,7 @@ class DashboardServiceTest {
      */
     private Long expectedWaitingDays(long userId) {
         return jdbcTemplate.queryForObject("""
-                SELECT COALESCE(GREATEST(CEIL(TIMESTAMPDIFF(HOUR, MIN(submitted_at), NOW()) / 24), 0), 0)
+                SELECT COALESCE(GREATEST(CEIL(TIMESTAMPDIFF(MINUTE, MIN(submitted_at), NOW()) / 1440), 1), 0)
                 FROM ticket
                 WHERE deleted = 0 AND status = 'PENDING' AND current_approver_id = ?
                 """, Long.class, userId);

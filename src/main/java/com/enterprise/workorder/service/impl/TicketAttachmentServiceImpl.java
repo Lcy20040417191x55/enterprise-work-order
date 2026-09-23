@@ -11,11 +11,13 @@ import com.enterprise.workorder.dto.AttachmentVO;
 import com.enterprise.workorder.entity.SysUser;
 import com.enterprise.workorder.entity.Ticket;
 import com.enterprise.workorder.entity.TicketAttachment;
+import com.enterprise.workorder.enums.TicketOpAction;
 import com.enterprise.workorder.enums.TicketStatus;
 import com.enterprise.workorder.mapper.TicketAttachmentMapper;
 import com.enterprise.workorder.security.LoginUser;
 import com.enterprise.workorder.security.SecurityUtils;
 import com.enterprise.workorder.service.TicketAttachmentService;
+import com.enterprise.workorder.service.TicketOpLogService;
 import com.enterprise.workorder.service.TicketService;
 import com.enterprise.workorder.service.UserService;
 import lombok.RequiredArgsConstructor;
@@ -57,6 +59,7 @@ public class TicketAttachmentServiceImpl implements TicketAttachmentService {
     private final UserService userService;
     private final AttachmentStorage storage;
     private final AttachmentProperties properties;
+    private final TicketOpLogService opLogService;
 
     @Override
     public List<AttachmentVO> list(Long ticketId) {
@@ -137,6 +140,16 @@ public class TicketAttachmentServiceImpl implements TicketAttachmentService {
         attachment.setFileSize(size);
         attachmentMapper.insert(attachment);
 
+        // 日志里带文件名：附件这条时间线若只说"上传了附件"，事后必须点开列表
+        // 才能知道传的是什么，而那可能已经是几个月后、文件早被删掉了。
+        // 文件名同时是这段历史唯一的可读线索。
+        //
+        // 日志写在插记录之后、返回之前，与附件记录同事务 ——
+        // 若插日志失败，附件记录会一起回滚，磁盘上只留下一个孤儿文件。
+        // 这个取舍与类注释里"先写文件再插记录"是同一个方向：
+        // 宁可浪费磁盘，也不让用户看到一条没有历史记录的附件。
+        opLogService.record(ticketId, TicketOpAction.ATTACH_UPLOAD, originalName);
+
         log.info("工单 {} 上传附件 {} ({}), stored={}",
                 ticket.getTicketNo(), originalName, humanSize(size), relativePath);
         return toVO(attachment, ticket);
@@ -193,6 +206,11 @@ public class TicketAttachmentServiceImpl implements TicketAttachmentService {
         attachmentMapper.deleteById(attachment.getId());
         log.info("工单 {} 的附件 {} 已删除 by {}", ticket.getTicketNo(),
                 attachment.getOriginalName(), current.getUsername());
+
+        // 日志必须在删磁盘文件之前写。本方法最后一步 storage.delete 是不抛异常的
+        // （失败只记日志），但它之后若再加任何代码，写在这里的日志就还在同一个事务里；
+        // 而"先删文件再写日志"则会留下"文件没了、日志也没有"的空洞。
+        opLogService.record(ticketId, TicketOpAction.ATTACH_DELETE, attachment.getOriginalName());
 
         // 最后一步：删磁盘文件。它不抛异常（失败只记日志），因此不会让上面的逻辑删除回滚
         storage.delete(attachment.getStoredPath());

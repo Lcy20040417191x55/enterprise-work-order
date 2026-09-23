@@ -141,6 +141,24 @@ public enum TicketStatus {
     }
 
     /**
+     * 是否可催办。
+     *
+     * <p>只有审批中的单能催 —— 催办的对象是"某个人手上还没处理的事"。
+     * 草稿还没交出去，没人对它负有处理义务；已办结的单更无从催起。</p>
+     *
+     * <p><b>这个规则为什么不属于"状态决定"却仍放在这里</b>：它确实只由状态决定
+     * （谁可以催是另一个问题，由 Service 判"是不是创建人"）。
+     * 与 isWithdrawable 取同一组状态，但语义不同，因此分开写而不是复用 ——
+     * 将来若允许"草稿也能提醒自己"，只需改这一处。</p>
+     */
+    public boolean isUrgeable() {
+        return switch (this) {
+            case PENDING -> true;
+            case DRAFT, APPROVED, REJECTED, WITHDRAWN, CLOSED -> false;
+        };
+    }
+
+    /**
      * 是否可撤回。
      *
      * <p>只有审批中的单需要撤回 —— 都还没交出去，或者已经办结，撤回无从谈起。</p>

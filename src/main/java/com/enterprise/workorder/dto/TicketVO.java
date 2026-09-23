@@ -94,6 +94,19 @@ public class TicketVO {
     private Boolean approvable;
 
     /**
+     * 当前状态是否允许催办。
+     *
+     * <p>与 {@code withdrawable} 恰好取同一组状态（都只有 PENDING），但语义不同：
+     * 那个是"申请人自己把单收回来"，这个是"申请人催别人快点"，因此分开写 ——
+     * 将来若允许草稿也能提醒自己，只改这一处，不会连带把撤回也放开。</p>
+     *
+     * <p>是否真的是创建人仍由后端在 {@code urge} 里校验。前端拿这个标记
+     * 只决定按钮显不显示，与 {@code approvable} 配 {@code currentApprover} 的用法一致。</p>
+     */
+    @Schema(description = "当前状态是否允许催办")
+    private Boolean urgeable;
+
+    /**
      * 当前登录人是否就是本单待办人。
      *
      * <p>与 {@code approvable} 配合使用：前者是"该不该显示审批按钮"，

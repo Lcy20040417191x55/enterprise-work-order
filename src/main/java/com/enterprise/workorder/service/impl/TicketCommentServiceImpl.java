@@ -8,12 +8,14 @@ import com.enterprise.workorder.dto.CommentVO;
 import com.enterprise.workorder.entity.SysUser;
 import com.enterprise.workorder.entity.Ticket;
 import com.enterprise.workorder.entity.TicketComment;
+import com.enterprise.workorder.enums.TicketOpAction;
 import com.enterprise.workorder.mapper.TicketCommentMapper;
 import com.enterprise.workorder.mapper.TicketMapper;
 import com.enterprise.workorder.security.LoginUser;
 import com.enterprise.workorder.security.SecurityUtils;
 import com.enterprise.workorder.service.NotificationService;
 import com.enterprise.workorder.service.TicketCommentService;
+import com.enterprise.workorder.service.TicketOpLogService;
 import com.enterprise.workorder.service.TicketService;
 import com.enterprise.workorder.service.UserService;
 import lombok.RequiredArgsConstructor;
@@ -36,11 +38,21 @@ import java.util.List;
 @RequiredArgsConstructor
 public class TicketCommentServiceImpl implements TicketCommentService {
 
+    /**
+     * 日志摘要保留的字符数。
+     *
+     * <p>取 120 而不是把 detail 的 500 用满：时间线一行能舒服读完的长度大约就是几十个字，
+     * 写成 500 会在详情页右侧那栏里折成十几行，把真正的关键信息（谁、做了什么）淹掉。
+     * 想看全文的人本来就有讨论区可看，日志只需要"提示这里发生过什么"。</p>
+     */
+    private static final int COMMENT_SUMMARY_MAX = 120;
+
     private final TicketCommentMapper commentMapper;
     private final TicketMapper ticketMapper;
     private final TicketService ticketService;
     private final NotificationService notificationService;
     private final UserService userService;
+    private final TicketOpLogService opLogService;
 
     @Override
     public List<CommentVO> list(Long ticketId) {
@@ -83,6 +95,12 @@ public class TicketCommentServiceImpl implements TicketCommentService {
             log.warn("工单 {} 的评论通知发送失败，评论本身已保存", ticketId, e);
         }
 
+        // 日志与通知的失败策略刻意不同：通知失败上面被吞掉了，日志失败则让整个事务回滚。
+        // 评论本身并不是审计凭证（作者随时可以撤回它），但"某人某时在单上说过话"这件事是 ——
+        // 若只落评论不留日志，一条被撤回的评论就彻底消失了，事后无法回答
+        // "这张单在驳回前到底沟通过什么"。
+        opLogService.record(ticketId, TicketOpAction.COMMENT, summaryOf(comment.getContent()));
+
         log.info("工单 {} 新增评论 by {}", ticket.getTicketNo(), current.getUsername());
         return toVO(comment);
     }
@@ -113,7 +131,34 @@ public class TicketCommentServiceImpl implements TicketCommentService {
         }
 
         commentMapper.deleteById(commentId);
+
+        // 撤回评论也要留痕：日志里保留内容摘要，而评论表里那条记录已经逻辑删除。
+        // 这正是"两份数据"的价值 —— 页面上不再显示这条评论（尊重作者的撤回意图），
+        // 但审计角度仍能追溯"这里曾经有过一次沟通，后来被撤回了"。
+        opLogService.record(ticketId, TicketOpAction.COMMENT_DELETE, summaryOf(comment.getContent()));
+
         log.info("评论 {} 已被作者撤回", commentId);
+    }
+
+    /**
+     * 评论正文的日志摘要。只取前若干字，单行显示。
+     *
+     * <p><b>为什么要截断</b>：评论可以写 1000 字，而日志的 detail 列是 500 字。
+     * 若不截断，长评论会让日志写入失败，而失败发生在"评论已保存"之后 ——
+     * 用户看到的是发布失败，实际评论却已经进库了，这类"看起来失败其实成功"的现象最难排查。
+     * 截断在这里比在日志组件里做更准确：只有这里知道这段文字是"评论摘要"而不是别的什么。</p>
+     *
+     * <p>把换行折叠成空格：日志是时间线上的一行，正文里的换行会让它撑成不规则的多行块，
+     * 后续条目被挤得看不出层级。</p>
+     */
+    private String summaryOf(String content) {
+        if (content == null) {
+            return null;
+        }
+        String oneLine = content.replaceAll("\\s+", " ").trim();
+        return oneLine.length() <= COMMENT_SUMMARY_MAX
+                ? oneLine
+                : oneLine.substring(0, COMMENT_SUMMARY_MAX) + "…";
     }
 
     /** 取显示名。用户被删/查不到时回落到登录名，不让快照字段变成空字符串 */

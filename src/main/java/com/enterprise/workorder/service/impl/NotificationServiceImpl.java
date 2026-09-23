@@ -69,6 +69,34 @@ public class NotificationServiceImpl implements NotificationService {
                 String.format("工单「%s」（%s）%s，请及时处理", title, ticketNo, reason));
     }
 
+    /**
+     * 催办通知。
+     *
+     * <p><b>文案里带上申请人姓名和附言</b>：待办列表里可能同时躺着好几张待处理的单，
+     * 一句"有工单待您审批"无法让人判断该先看哪一张。带上"谁在催、催什么"，
+     * 审批人扫一眼就知道轻重。</p>
+     *
+     * <p>附言为空时只落前半句，不拼出一个空括号或"附言："这样的残缺句子 ——
+     * 正文会直接显示在通知列表里，拼接痕迹很难看，而且会让人怀疑是不是显示错位了。</p>
+     */
+    @Override
+    public void notifyUrge(Long ticketId, Long approverId, String ticketNo, String title,
+                           String creatorName, String reason) {
+        if (approverId == null) {
+            // 与 notifyTodo 同样的兜底：没有待办人时说明这张单的状态已经变了。
+            // 催办入口自己会先校验状态，这里只是防御。
+            log.warn("工单 {} 没有待办人，跳过催办通知", ticketNo);
+            return;
+        }
+        String content = String.format("工单「%s」（%s）等待您处理，%s 已催办",
+                title, ticketNo, creatorName);
+        if (reason != null && !reason.isBlank()) {
+            content = content + "：" + reason.trim();
+        }
+        insert(approverId, NotificationType.TICKET_URGE, ticketId,
+                "您有工单被催办了", content);
+    }
+
     @Override
     public void notifyApproved(Long ticketId, Long creatorId, String ticketNo, String title) {
         insert(creatorId, NotificationType.TICKET_APPROVED, ticketId,

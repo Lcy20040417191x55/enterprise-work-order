@@ -85,10 +85,19 @@ public class DashboardServiceImpl implements DashboardService {
         if (earliest == null) {
             summary.setLongestWaitingDays(0L);
         } else {
-            // 向上取整到"天"：上午提交、下午查看应当显示 1 天而不是 0 天 ——
-            // 0 天看起来像"刚提交的"，会让积压的真实状况被低估。
-            long hours = ChronoUnit.HOURS.between(earliest, LocalDateTime.now());
-            summary.setLongestWaitingDays(hours <= 0 ? 0L : (hours + 23) / 24);
+            // 向上取整到"天"，且只要有待办就至少算 1 天。
+            //
+            // 这里刻意用"分钟"而不是"小时"做除法：若先取整到小时，
+            // 一张 10 分钟前提交的待办会算出 0 天，卡片上便出现
+            // "我的待办 1 / 暂无积压"这种自相矛盾的组合。
+            // 改成分计算再由它向上取整，任何"存在待办"的情况都落在 [1, ...] 天，
+            // 与 SQL 统计口径（TicketMapper#selectStats 的 MIN(submitted_at)）
+            // 及 DashboardServiceTest#expectedWaitingDays 完全一致。
+            //
+            // minutes <= 0 只可能是时钟回拨造成的负值；既然确实有待办，
+            // 就仍然报 1 天，不把异常数据渲染成负数或 0。
+            long minutes = ChronoUnit.MINUTES.between(earliest, LocalDateTime.now());
+            summary.setLongestWaitingDays(minutes <= 0 ? 1L : (minutes + 1439) / 1440);
         }
         return summary;
     }

@@ -44,6 +44,19 @@ public interface NotificationService {
     /** 新评论时通知工单参与人（创建人 + 当前待办人 + 历史审批人），评论人自己除外 */
     void notifyComment(Long ticketId, Long commenterId, String ticketNo, String title, String commenterName);
 
+    /**
+     * 催办：申请人提醒当前待办人尽快处理。
+     *
+     * <p><b>为什么收件人只有当前待办人，不像评论那样发给全部参与人</b>：
+     * 催办是一个指向明确的动作 —— 申请人要的是"卡在你手里的那张单请你处理"。
+     * 发给历史审批人（他们已经不在流程上了）只会制造噪音，
+     * 而噪音多了的后果是有人干脆关掉通知，连带错过真正给他们的待办。</p>
+     *
+     * @param reason 申请人的附言，可以为 null（用默认文案）
+     */
+    void notifyUrge(Long ticketId, Long approverId, String ticketNo, String title,
+                    String creatorName, String reason);
+
     // ================= 面向当前登录人的读写 =================
 
     /** 分页查询当前登录人的通知，按时间倒序 */

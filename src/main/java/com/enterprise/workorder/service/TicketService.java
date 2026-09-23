@@ -3,6 +3,7 @@ package com.enterprise.workorder.service;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.enterprise.workorder.dto.TicketCreateRequest;
 import com.enterprise.workorder.dto.TicketQuery;
+import com.enterprise.workorder.dto.TicketOpLogVO;
 import com.enterprise.workorder.dto.TicketUpdateRequest;
 import com.enterprise.workorder.dto.TicketVO;
 import com.enterprise.workorder.entity.ApprovalRecord;
@@ -90,6 +91,24 @@ public interface TicketService {
 
     /** 工单的审批轨迹，按发生顺序返回 */
     List<ApprovalRecord> history(Long ticketId);
+
+    /**
+     * 工单的完整操作日志，按发生顺序返回。
+     *
+     * <p><b>与 {@link #history} 的区别</b>：history 只含审批链上的动作（提交/通过/驳回/撤回/作废），
+     * 是"这张单走流程走得怎么样"；本方法还包含评论、附件增删、催办，
+     * 是"这张单上都发生过什么"。详情页的时间线用后者，
+     * 审批进度条（第几级/共几级）用前者 —— 两者的展示目的不同，不能互相替代。</p>
+     */
+    List<TicketOpLogVO> opLogs(Long ticketId);
+
+    /**
+     * 催办：申请人提醒当前待办人尽快处理。
+     *
+     * <p>只有创建人本人、且工单处于审批中时可催，且两次催办之间有最短间隔
+     * （见实现里的常量说明）。</p>
+     */
+    void urge(Long ticketId, String reason);
 
     /**
      * 导出前的准备：校验查询条件，并统计符合条件的总行数。

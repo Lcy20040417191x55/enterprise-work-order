@@ -5,8 +5,10 @@ import com.enterprise.workorder.common.Result;
 import com.enterprise.workorder.dto.ApprovalRequest;
 import com.enterprise.workorder.dto.TicketCancelRequest;
 import com.enterprise.workorder.dto.TicketCreateRequest;
+import com.enterprise.workorder.dto.TicketOpLogVO;
 import com.enterprise.workorder.dto.TicketQuery;
 import com.enterprise.workorder.dto.TicketUpdateRequest;
+import com.enterprise.workorder.dto.TicketUrgeRequest;
 import com.enterprise.workorder.dto.TicketVO;
 import com.enterprise.workorder.entity.ApprovalRecord;
 import com.enterprise.workorder.entity.Ticket;
@@ -93,6 +95,25 @@ public class TicketController {
         return Result.success("已撤回", null);
     }
 
+    /**
+     * 催办。
+     *
+     * <p><b>为什么不在路径或权限配置上限定"谁能催"</b>：审批、撤回这类动作的操作人是
+     * 固定的某类角色，权限规则一眼能写出来。催办的操作人是"这张单的创建人" ——
+     * 这是数据维度的规则而非角色维度：同一个 EMPLOYEE 在 A 单上能催、在 B 单上不能。
+     * 硬写进权限配置只会得到一条形同虚设的规则，真正的判定只能在 Service 里做。</p>
+     *
+     * <p>请求体可省略：催办的核心信息是"谁在催哪张单"，说明是锦上添花。
+     * 用户只点一下按钮、不填理由时前端会发一个空对象过来，这里照样接受。</p>
+     */
+    @Operation(summary = "催办工单（仅审批中的单，仅创建人，两次间隔至少30分钟）")
+    @PostMapping("/{id}/urge")
+    public Result<Void> urge(@PathVariable Long id,
+                             @Valid @RequestBody(required = false) TicketUrgeRequest request) {
+        ticketService.urge(id, request == null ? null : request.getReason());
+        return Result.success("已催办，已通知当前审批人", null);
+    }
+
     @Operation(summary = "作废工单（仅草稿与已驳回，仅创建人）")
     @PostMapping("/{id}/cancel")
     public Result<Void> cancel(@PathVariable Long id,
@@ -150,5 +171,23 @@ public class TicketController {
     @GetMapping("/{id}/history")
     public Result<List<ApprovalRecord>> history(@PathVariable Long id) {
         return Result.success(ticketService.history(id));
+    }
+
+    /**
+     * 完整操作日志（含评论、附件增删、催办）。
+     *
+     * <p><b>为什么不让前端把 history、评论、附件三个接口自己拼成一条时间线</b>：
+     * 那样前端要拉三次再自己排序，而三处的时间戳精度、序列化格式、排序口径
+     * 只要有一处不同，拼出来的顺序就是错的 —— 例如"上传附件"排到了"审批通过"之后。
+     * 顺序恰恰是时间线这类界面的全部价值所在。由后端一次查、一次排，
+     * 顺序只有一份实现。</p>
+     *
+     * <p>可见性与详情页完全一致（内部复用同一份权限判定），
+     * 因此不存在"看不到工单却能把它的操作日志拉出来"这条路径。</p>
+     */
+    @Operation(summary = "操作日志（含评论、附件、催办）")
+    @GetMapping("/{id}/op-logs")
+    public Result<List<TicketOpLogVO>> opLogs(@PathVariable Long id) {
+        return Result.success(ticketService.opLogs(id));
     }
 }
