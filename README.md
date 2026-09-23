@@ -64,6 +64,9 @@ GET    /api/tickets/{id}/history   审批轨迹 → List<ApprovalRecord>
 GET    /api/ticket-types           仅启用的类型
 GET    /api/ticket-types/all       含停用（ADMIN）
 POST/PUT/DELETE /api/ticket-types  增删改（ADMIN；被工单引用时返回 code 1001）
+
+GET    /api/agent/status           智能助手是否可用（未配 API Key 时 available=false）
+POST   /api/agent/chat             对话：可识别建单意图返回草稿、查询当前用户工单、查看某张单详情
 ```
 
 枚举取值：
@@ -74,6 +77,101 @@ POST/PUT/DELETE /api/ticket-types  增删改（ADMIN；被工单引用时返回 
 
 错误码：200 成功、400 参数错误、401 未登录、403 无权限、404 不存在、405 方法不允许、
 415 媒体类型不支持、500 服务端异常、**1001 业务校验失败**。
+
+## 智能助手（大模型）
+
+用自然语言描述一件事，助手把它整理成一张**工单草稿**，用户确认后自己提交。
+
+```
+POST /api/agent/chat
+{ "message": "三楼打印机坏了，急着报销用", "history": [] }
+
+-> { code: 200, data: {
+       reply: "已为你填好，请确认后提交。",
+       draft: { typeId: 3, typeName: "IT支持", title: "三楼打印机故障",
+                content: "...", priority: "URGENT", confidence: 0.92,
+                reasoning: "描述涉及设备故障", warning: null },
+       toolsUsed: ["draftTicket"] } }
+```
+
+### 为什么做成"只出草稿、不自动提交"
+
+模型会猜错 —— 把"不着急"听成紧急、把报销单归到 IT 类。若助手直接落库并提交，
+错误的单子已经进了审批流，需要别人去驳回、去作废，代价由他人承担。
+产出草稿则把最后一步交回用户：AI 犯错时的爆炸半径被限制在"多看一眼"这个量级。
+
+### 两个实现要点
+
+1. **工具调用（function calling），不是"让模型输出 JSON"。**
+   后者要在提示词里反复叮嘱"只输出 JSON"，而模型时不时会加一句"好的，这是结果："
+   导致解析失败。前者把格式交给 schema 约束，是协议层的事，不依赖模型自觉。
+
+2. **工具执行时的身份只从令牌取，绝不由对话传。**
+   历史消息是前端送来的，可以伪造。一旦身份能从对话里传进来，
+   问一句"帮我看看总经理的单"就能越权读到别人数据。
+   同理，查询走 `TicketService.page()` 而不是直接查 Mapper ——
+   可见性规则只允许有一份实现，否则普通接口收紧了范围而 Agent 这条路径没跟上。
+
+### 助手能调用的工具
+
+| 工具 | 作用 | 触发场景 |
+|---|---|---|
+| `listTicketTypes` | 列出启用的工单类型 | 不确定该归到哪个类型时 |
+| `queryMyTickets` | 查询当前用户可见的工单列表 | 「我有哪些待办」「我的单走完了吗」 |
+| `draftTicket` | 生成工单草稿 | 「打印机坏了，帮我提一张单」 |
+| `getTicketDetail` | 查某一张单的详情 + 审批轨迹 + 操作时间线 | 「我上次提的报销单为什么被驳回」「现在卡在谁那里」 |
+
+`getTicketDetail` 的两个设计点：
+
+1. **按单号或标题定位，而不是让模型给 id。** 模型手里没有 id ——
+   用户说「我那张打印机维修的单」，它不可能知道那是 689 号；硬要它输出 id 只会编一个。
+   让工具去查、模型只说「要找哪张单」，才是它擅长的分工。
+2. **搜索范围是两个 scope 的并集（`all` = 我发起的 ∪ 待我审批，`done` = 我审批过的），
+   恰好等于可见范围的补集，因此不新增权限面。** 查不到时不区分「不存在」与「无权查看」，
+   回同一句话 —— 否则这个工具会变成探测他人工单是否存在的接口。
+   轨迹与时间线各只保留最近 8 条：老单可能有上百条，全给既烧 token 又淹没重点。
+
+### 模型输出一律不信任
+
+官方文档明确说模型可能生成非法 JSON、也可能带上 schema 里没定义的参数。所以：
+
+| 情况 | 处理 |
+|---|---|
+| `typeCode` 查不到 | `typeId` 置空 + warning，让用户自己选。**不替他猜** —— 选错类型意味着走错审批链 |
+| `priority` 非法 | 回落 `NORMAL`，而不是猜一个。把不急的单标成 URGENT 会浪费审批人的注意力 |
+| 标题为空 | 用内容首句兜底，至少让表单里有点东西 |
+| 参数不是合法 JSON | 回一份带 error 的结果给模型，让它换种方式重答；不抛异常 |
+| 工具调用不收敛 | 轮次上限 4 轮，超限即收场。**已拿到的草稿仍然返回**，不连带丢弃 |
+
+### 配置
+
+`application.yml` 只放可公开的参数，`api-key` 放 `application-local.yml`（已被 gitignore）：
+
+```yaml
+# application.yml
+app:
+  llm:
+    base-url: https://api.deepseek.com
+    model: deepseek-flash
+    timeout: 30s
+    thinking: false          # 本场景不需要思维链，开着只会更慢更贵
+    max-tool-rounds: 4
+
+# application-local.yml（不进版本库）
+app:
+  llm:
+    api-key: sk-xxxxxxxx
+```
+
+Key 到 [platform.deepseek.com](https://platform.deepseek.com) 注册后创建。
+**留空时助手整体降级为不可用**（`/api/agent/status` 返回 `available=false`，前端隐藏入口），
+工单系统的其余功能完全不受影响。
+
+换供应商只改这两行配置：`base-url` 填 `https://api.openai.com/v1` 即可，
+代码里只实现了一套 OpenAI 兼容协议。
+
+> 注意 DeepSeek 已换过一轮模型命名，旧教程里的 `deepseek-chat` 不在当前可用列表内，
+> 照抄会得到 400。当前可用的是 `deepseek-flash` 与 `deepseek-v4-pro`。
 
 ## 导出 Excel
 

@@ -122,6 +122,29 @@ app:
     expire-hours: 24
     header: Authorization
     prefix: "Bearer "
+  # =====================================================================
+  #  智能助手（大模型）
+  # =====================================================================
+  # 这里只放可以公开的参数。api-key 属于凭据，一律写在 application-local.yml
+  # （该文件已被 gitignore），不要出现在本文件里。
+  #
+  # 未配置 api-key 时，AgentService 会把助手整体降级为不可用（/api/agent/status
+  # 返回 available=false），工单系统本身的功能完全不受影响 —— 它是可选的附加能力。
+  llm:
+    # OpenAI 兼容协议的地址。DeepSeek 用 https://api.deepseek.com
+    # （注意不要加 /v1，它的路由不认）；换 OpenAI 官方则填 https://api.openai.com/v1
+    base-url: https://api.deepseek.com
+    # 模型名。DeepSeek 当前可用的是 deepseek-flash（快、便宜）与 deepseek-v4-pro（强、贵）。
+    # 旧教程里的 deepseek-chat 已不在可用模型列表内，照抄会得到 400。
+    model: deepseek-flash
+    # 单次请求超时，要覆盖模型生成整段回答的时间
+    timeout: 30s
+    # 思考模式。默认关闭：本场景只是把一句话填进几个字段，开着只会更慢更贵
+    thinking: false
+    # 工具调用轮次上限，防止模型在两个工具之间来回调用形成死循环
+    max-tool-rounds: 4
+    # 单轮最多携带的历史消息条数，防止超长历史把上下文撑爆
+    max-history-messages: 20
 
 logging:
   level:
