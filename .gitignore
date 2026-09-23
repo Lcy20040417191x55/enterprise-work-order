@@ -19,6 +19,10 @@ src/main/resources/application-local.properties
 # ==================== 日志 ====================
 logs/
 *.log
+# 后缀带 .log 之后又跟了 .err / .out 的写法（如 dev-run.err.log）上面已经能匹配；
+# 但实际还有 dev-agent.log.err 这种“.log 在中间”的命名，*.log 匹配不到，故单列。
+*.log.err
+*.log.out
 
 # ==================== 操作系统 ====================
 .DS_Store
