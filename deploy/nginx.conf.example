@@ -1,0 +1,40 @@
+# 将 server_name、root 和证书路径替换成服务器实际值。
+# 前端和后端通过同一个域名提供服务，浏览器请求 /api 时由 Nginx 转发到 Spring Boot。
+server {
+    listen 80;
+    server_name workorder.example.com;
+
+    # HTTPS 配置完成后，把 80 端口改为跳转到 HTTPS。
+    client_max_body_size 30m;
+
+    root /srv/enterprise-work-order/web;
+    index index.html;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    # 只暴露不含敏感详情的健康状态，方便负载均衡或监控探活。
+    location = /actuator/health {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /assets/ {
+        try_files $uri =404;
+        expires 7d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # 当前前端使用 hash 路由；保留回退规则，后续切 history 路由也能直接刷新页面。
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
